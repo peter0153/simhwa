@@ -604,4 +604,298 @@ init();
 })();
 </script>
 
+<!-- clean report/PDF add-on: hide inactive default outputs -->
+<script>
+(() => {
+  'use strict';
+  const q = (s) => document.querySelector(s);
+  const qa = (s) => Array.from(document.querySelectorAll(s));
+  const esc = (v) => String(v ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  const val = (s) => {
+    const el = q(s);
+    return el && 'value' in el ? String(el.value || '').trim() : '';
+  };
+  const safeName = (v) => String(v || '학생').replace(/[^가-힣A-Za-z0-9_-]/g, '_');
+  const downloadFile = (name, blob) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 900);
+  };
+  const toast = (msg) => {
+    const box = q('#toast');
+    if (!box) { alert(msg); return; }
+    box.textContent = msg;
+    box.classList.add('show');
+    clearTimeout(window.__cleanReportToastTimer);
+    window.__cleanReportToastTimer = setTimeout(() => box.classList.remove('show'), 2400);
+  };
+  const canvasURL = (selector) => {
+    try {
+      const canvas = q(selector);
+      if (!canvas || !canvas.width || !canvas.height) return '';
+      return canvas.toDataURL('image/png');
+    } catch (_) { return ''; }
+  };
+  const textLines = (s) => esc(s || '(미작성)').replace(/\n/g, '<br>');
+
+  const FLAGS_KEY = 'infoCareerLabActivityFlags_v3';
+  const defaultFlags = () => ({ audio:false, image:false, graph:false, chain:false });
+  const loadFlags = () => {
+    try { return Object.assign(defaultFlags(), JSON.parse(localStorage.getItem(FLAGS_KEY) || '{}')); }
+    catch (_) { return defaultFlags(); }
+  };
+  const saveFlags = (flags) => localStorage.setItem(FLAGS_KEY, JSON.stringify(flags));
+  const mark = (key) => {
+    const flags = loadFlags();
+    flags[key] = true;
+    saveFlags(flags);
+  };
+
+  function hasCanvasMeaning(selector) {
+    try {
+      const c = q(selector);
+      if (!c) return false;
+      const ctx = c.getContext('2d');
+      const data = ctx.getImageData(0, 0, c.width, c.height).data;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i+3] && (data[i] !== 255 || data[i+1] !== 255 || data[i+2] !== 255)) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function installActivityTracking() {
+    const clickMap = [
+      ['#runAudio','audio'], ['#loadAudioExamplePair','audio'], ['#downloadClean','audio'],
+      ['#runImage','image'], ['#generateNeural','image'], ['#sampleImage','image'], ['#nextImageExample','image'], ['#downloadImage','image'],
+      ['#downloadGeneratedA','image'], ['#downloadGeneratedB','image'], ['#downloadGeneratedC','image'],
+      ['#addRelation','graph'], ['#drawGraph','graph'], ['#resetShock','graph'], ['#stepShock','graph'], ['#playShock','graph'],
+      ['#addBlock','chain'], ['#loadChainExample','chain'], ['#validateChain','chain']
+    ];
+    clickMap.forEach(([selector, key]) => {
+      const el = q(selector);
+      if (el) el.addEventListener('click', () => mark(key), true);
+    });
+
+    const changeMap = [
+      ['#mixedInputFile','audio'], ['#noiseRefFile','audio'], ['#audioCasePreset','audio'],
+      ['#imageFile','image'], ['#styleFile','image'], ['#imageCasePreset','image'],
+      ['#graphCasePreset','graph'], ['#graphTopic','graph'], ['#graphSourceImage','graph'],
+      ['#chainCasePreset','chain'], ['#assetFile','chain']
+    ];
+    changeMap.forEach(([selector, key]) => {
+      const el = q(selector);
+      if (el) el.addEventListener('change', () => mark(key), true);
+    });
+
+    const chain = q('#chainList');
+    if (chain) new MutationObserver(() => {
+      if (qa('#chainList .block').length) mark('chain');
+    }).observe(chain, { childList:true, subtree:true });
+  }
+
+  function activeFlags() {
+    const flags = loadFlags();
+    const hasAudio = !!(q('#cleanPlayer') && q('#cleanPlayer').src) || hasCanvasMeaning('#audioCanvas');
+    const hasImage = hasCanvasMeaning('#imgGeneratedA') || hasCanvasMeaning('#imgGeneratedB') || hasCanvasMeaning('#imgGeneratedC') || !!val('#imageIntent');
+    const hasGraph = qa('#edgeList .edgeItem').length > 0 || qa('#relationRows .relation input').some(input => input.value && input.value.trim());
+    const hasChain = qa('#chainList .block').length > 0;
+    return {
+      audio: !!(flags.audio && hasAudio),
+      image: !!(flags.image && hasImage),
+      graph: !!(flags.graph && hasGraph),
+      chain: !!(flags.chain && hasChain)
+    };
+  }
+
+  function relationItems() {
+    const listed = qa('#edgeList .edgeItem').map(el => el.innerText.trim()).filter(Boolean);
+    if (listed.length) return listed;
+    return qa('#relationRows .relation').map(row => {
+      const inputs = qa('input', row).map(input => input.value.trim());
+      return inputs.filter(Boolean).length ? inputs.join(' - ') : '';
+    }).filter(Boolean);
+  }
+
+  function chainItems() {
+    return qa('#chainList .block').map(el => el.innerText.trim()).filter(Boolean);
+  }
+
+  function svgMarkup() {
+    const svg = q('#graphSvg');
+    if (!svg) return '';
+    let out = svg.outerHTML;
+    if (!/xmlns=/.test(out)) out = out.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+    return out;
+  }
+
+  function fig(title, url) {
+    return url ? `<figure><figcaption>${esc(title)}</figcaption><img src="${url}" alt="${esc(title)}"></figure>` : '';
+  }
+
+  function buildMarkdown() {
+    const active = activeFlags();
+    let md = `# 정보 진로 심화 Lab 활동 보고서\n\n`;
+    md += `- 이름: ${val('#studentName') || '미입력'}\n`;
+    md += `- 학번·번호: ${val('#studentNo') || '미입력'}\n`;
+    md += `- 진로·관심 분야: ${val('#career') || '미입력'}\n`;
+    md += `- 연결한 문제: ${val('#interest') || '미입력'}\n`;
+    md += `- 작성 시각: ${new Date().toLocaleString('ko-KR')}\n\n`;
+    md += `## 1. 내가 사용한 자료와 진로의 연결\n${val('#rec1') || '(미작성)'}\n\n`;
+    md += `## 2. 내가 직접 정한 조건과 기준\n${val('#rec2') || '(미작성)'}\n\n`;
+    md += `## 3. 결과와 판단 근거\n${val('#rec3') || '(미작성)'}\n\n`;
+    md += `## 4. 활용 가능성·한계·추가 질문\n${val('#rec4') || '(미작성)'}\n\n`;
+
+    if (active.audio) {
+      md += `## NLMS 소리 활동\n- 설정 프리셋: ${val('#audioPreset') || '미입력'}\n- 학습률 μ: ${val('#audioMu') || '미입력'}\n- 정규화 안정화 항 δ: ${val('#audioEps') || '미입력'}\n- 필터 길이: ${val('#audioFilterLen') || '미입력'}\n\n`;
+    }
+    if (active.image) {
+      md += `## 이미지 생성 활동\n- 활동 사례: ${val('#imageCasePreset') || '미입력'}\n- 스타일: ${val('#stylePreset') || '미입력'}\n- 생성 강도: ${val('#styleStrength') || '미입력'}%\n- 구조 변화: ${val('#structureStrength') || '미입력'}%\n- 원본 보존: ${val('#preserveStrength') || '미입력'}%\n- 시드: ${val('#seedBase') || '미입력'}\n- 생성 의도: ${val('#imageIntent') || '미입력'}\n\n`;
+    }
+    if (active.graph) {
+      md += `## 관계 그래프·충격 전파\n- 주제: ${val('#graphTopic') || '미입력'}\n`;
+      const rels = relationItems();
+      md += rels.length ? rels.map(x => `- ${x}`).join('\n') + '\n\n' : '- 관계 미입력\n\n';
+    }
+    if (active.chain) {
+      md += `## 출처·AI 변형 이력\n`;
+      const blocks = chainItems();
+      md += blocks.length ? blocks.map(x => `- ${x.replace(/\n/g, ' / ')}`).join('\n') + '\n\n' : '- 이력 미입력\n\n';
+    }
+    if (!active.audio && !active.image && !active.graph && !active.chain) {
+      md += `## 활동 결과\n아직 실행한 활동이 없어 기본 설정값과 예시 결과는 출력하지 않았습니다. 프리셋을 불러오거나 파일을 넣고 활동을 실행하면 해당 활동만 보고서에 포함됩니다.\n`;
+    }
+    return md;
+  }
+
+  function buildHTMLReport(printMode=false) {
+    const active = activeFlags();
+    const name = val('#studentName') || '학생';
+    const answerBox = (title, body) => `<section class="box"><h2>${esc(title)}</h2><p>${textLines(body || '(미작성)')}</p></section>`;
+
+    let body = `
+<h1>정보 진로 심화 Lab 활동 보고서</h1>
+<div class="meta">
+  <div><b>이름</b> ${esc(val('#studentName') || '미입력')}</div>
+  <div><b>학번·번호</b> ${esc(val('#studentNo') || '미입력')}</div>
+  <div><b>진로·관심 분야</b> ${esc(val('#career') || '미입력')}</div>
+  <div><b>작성 시각</b> ${esc(new Date().toLocaleString('ko-KR'))}</div>
+  <div class="full"><b>연결한 문제</b> ${esc(val('#interest') || '미입력')}</div>
+</div>
+${answerBox('1. 내가 사용한 자료와 진로의 연결', val('#rec1'))}
+${answerBox('2. 내가 직접 정한 조건과 기준', val('#rec2'))}
+${answerBox('3. 결과와 판단 근거', val('#rec3'))}
+${answerBox('4. 활용 가능성·한계·추가 질문', val('#rec4'))}`;
+
+    if (active.audio) {
+      body += `<section class="section"><h2>NLMS 소리 활동</h2>
+      <p><b>설정 프리셋:</b> ${esc(val('#audioPreset') || '미입력')} · <b>μ:</b> ${esc(val('#audioMu') || '미입력')} · <b>δ:</b> ${esc(val('#audioEps') || '미입력')} · <b>필터 길이:</b> ${esc(val('#audioFilterLen') || '미입력')}</p>
+      ${fig('소리 파형 비교', canvasURL('#audioCanvas'))}</section>`;
+    }
+    if (active.image) {
+      const imgs = [
+        fig('내용 사진', canvasURL('#imgOriginal')),
+        fig('스타일 사진', canvasURL('#imgStyleRef')),
+        fig('압축·노이즈 복원 결과', canvasURL('#imgResult')),
+        fig('새 이미지 결과 1', canvasURL('#imgGeneratedA')),
+        fig('새 이미지 결과 2', canvasURL('#imgGeneratedB')),
+        fig('새 이미지 결과 3', canvasURL('#imgGeneratedC'))
+      ].filter(Boolean).join('');
+      body += `<section class="section"><h2>이미지 생성 활동</h2>
+      <p><b>활동 사례:</b> ${esc(val('#imageCasePreset') || '미입력')} · <b>스타일:</b> ${esc(val('#stylePreset') || '미입력')} · <b>생성 강도:</b> ${esc(val('#styleStrength') || '미입력')}% · <b>구조 변화:</b> ${esc(val('#structureStrength') || '미입력')}% · <b>원본 보존:</b> ${esc(val('#preserveStrength') || '미입력')}% · <b>시드:</b> ${esc(val('#seedBase') || '미입력')}</p>
+      <p><b>생성 의도:</b> ${esc(val('#imageIntent') || '미입력')}</p>
+      <div class="images">${imgs || '<p>이미지 결과가 아직 없습니다.</p>'}</div></section>`;
+    }
+    if (active.graph) {
+      const rels = relationItems().map(x => `<li>${esc(x)}</li>`).join('') || '<li>관계 미입력</li>';
+      body += `<section class="section"><h2>관계 그래프·충격 전파</h2>
+      <p><b>주제:</b> ${esc(val('#graphTopic') || '미입력')}</p>
+      <ul>${rels}</ul>
+      <div class="graph">${svgMarkup()}</div></section>`;
+    }
+    if (active.chain) {
+      const blocks = chainItems().map(x => `<div class="chain-item">${textLines(x)}</div>`).join('') || '<p>출처 이력 미입력</p>';
+      body += `<section class="section"><h2>출처·AI 변형 이력</h2>${blocks}</section>`;
+    }
+    if (!active.audio && !active.image && !active.graph && !active.chain) {
+      body += `<section class="section empty"><h2>활동 결과</h2><p>아직 실행한 활동이 없어 기본 설정값과 예시 결과는 출력하지 않았습니다. 프리셋을 불러오거나 파일을 넣고 활동을 실행하면 해당 활동만 보고서에 포함됩니다.</p></section>`;
+    }
+
+    return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>정보진로심화Lab_보고서_${esc(name)}</title>
+<style>
+@page{size:A4;margin:13mm}*{box-sizing:border-box}
+body{margin:${printMode?'0':'34px'};color:#17233b;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans KR",sans-serif;line-height:1.58;font-size:${printMode?'10.5pt':'15px'};max-width:${printMode?'none':'900px'}}
+h1{font-size:${printMode?'21pt':'28px'};margin:0 0 10px;color:#173d87;border-bottom:2px solid #2764d6;padding-bottom:9px}h2{font-size:${printMode?'13pt':'19px'};color:#1c4fa6;margin:20px 0 8px}
+.meta{display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#f4f8ff;border:1px solid #d9e7fa;border-radius:9px;padding:12px}.meta .full{grid-column:1/-1}.meta b{color:#315387}
+.box,.section{break-inside:avoid;border:1px solid #dce4ef;border-radius:9px;background:#fbfdff;padding:11px 13px;margin-top:11px}.box h2{margin-top:0}.box p{margin:0}
+.images{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.images figure,figure{margin:0;break-inside:avoid;border:1px solid #dce4ef;border-radius:8px;padding:7px;background:#fff}.images figcaption,figcaption{font-weight:700;margin-bottom:5px;color:#2e466c}img{display:block;width:100%;max-height:${printMode?'205px':'280px'};object-fit:contain;background:#f8fbff}.graph svg{width:100%;height:auto}.chain-item{border:1px solid #dce4ef;border-radius:8px;padding:9px;background:#fff;margin:7px 0;font-size:${printMode?'9.3pt':'13px'}}.empty{background:#fff8ed;border-color:#f0d7b7}
+</style></head><body>${body}</body></html>`;
+  }
+
+  function overrideDownloads() {
+    const md = q('#downloadMarkdown');
+    if (md) md.onclick = () => {
+      const name = safeName(val('#studentName') || '학생');
+      downloadFile(`정보진로심화Lab_보고서_${name}.md`, new Blob([buildMarkdown()], {type:'text/markdown;charset=utf-8'}));
+      toast('텍스트 보고서를 저장했습니다.');
+    };
+
+    const htmlBtn = q('#downloadReport');
+    if (htmlBtn) htmlBtn.onclick = () => {
+      const name = safeName(val('#studentName') || '학생');
+      downloadFile(`정보진로심화Lab_보고서_${name}.html`, new Blob([buildHTMLReport(false)], {type:'text/html;charset=utf-8'}));
+      toast('제출용 HTML 보고서를 저장했습니다.');
+    };
+
+    let pdf = q('#downloadPdf');
+    if (!pdf) {
+      const target = q('#downloadReport') || q('#downloadMarkdown') || q('#saveWork');
+      if (target) {
+        pdf = document.createElement('button');
+        pdf.type = 'button';
+        pdf.id = 'downloadPdf';
+        pdf.className = 'btn sec';
+        pdf.textContent = '제출용 PDF 저장 (.pdf)';
+        target.insertAdjacentElement('afterend', pdf);
+      }
+    }
+    const notice = q('#report .notice');
+    if (notice && !q('#pdfSaveGuide')) {
+      const guide = document.createElement('div');
+      guide.id = 'pdfSaveGuide';
+      guide.className = 'mini';
+      guide.style.marginTop = '9px';
+      guide.textContent = 'PDF 저장을 누르면 인쇄 창이 열립니다. 대상에서 “PDF로 저장”을 선택하세요.';
+      notice.insertAdjacentElement('beforebegin', guide);
+    }
+    if (pdf) pdf.onclick = () => {
+      const win = window.open('', '_blank');
+      if (!win) { toast('팝업 차단을 해제한 뒤 다시 눌러 주세요.'); return; }
+      win.document.open();
+      win.document.write(buildHTMLReport(true));
+      win.document.close();
+      const start = () => { try { win.focus(); win.print(); } catch (_) {} };
+      const imgs = Array.from(win.document.images);
+      if (!imgs.length) { setTimeout(start, 250); return; }
+      let doneCount = 0;
+      const done = () => { doneCount += 1; if (doneCount >= imgs.length) setTimeout(start, 180); };
+      imgs.forEach(img => img.complete ? done() : (img.onload = img.onerror = done));
+      setTimeout(start, 1200);
+    };
+  }
+
+  function install() {
+    installActivityTracking();
+    overrideDownloads();
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install);
+  else install();
+  setTimeout(overrideDownloads, 300);
+})();
+</script>
 </body></html>
